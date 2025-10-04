@@ -101,9 +101,6 @@ export default function CostApprovalApp() {
   const [loginError, setLoginError] = useState('')
   const [loginLoading, setLoginLoading] = useState(false)
   const [darkMode, setDarkMode] = useState(false)
-  const [showPasswordChange, setShowPasswordChange] = useState(false)
-  const [newPasswordData, setNewPasswordData] = useState({ password: '', confirmPassword: '' })
-  const [passwordChangeLoading, setPasswordChangeLoading] = useState(false)
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'new' | 'approvals' | 'history' | 'users'>('dashboard')
   const [requests, setRequests] = useState<CostRequest[]>([])
@@ -196,83 +193,8 @@ export default function CostApprovalApp() {
   useEffect(() => {
     if (user) {
       console.log('Usuário logado, bucket "attachments" deve estar disponível')
-      checkFirstLogin()
     }
   }, [user])
-
-  // Check if user needs to change password on first login
-  const checkFirstLogin = async () => {
-    if (!user) return
-
-    try {
-      const { data, error } = await supabase
-        .from('usuarios')
-        .select('primeiro_login')
-        .eq('email', user.email)
-        .single()
-      
-      if (error) {
-        console.error('Erro ao verificar primeiro login:', error)
-        return
-      }
-      
-      if (data?.primeiro_login) {
-        setShowPasswordChange(true)
-      }
-    } catch (error) {
-      console.error('Erro ao conectar com Supabase:', error)
-    }
-  }
-
-  // Handle password change for first login
-  const handlePasswordChange = async (e: React.FormEvent) => {
-    e.preventDefault()
-    
-    if (newPasswordData.password !== newPasswordData.confirmPassword) {
-      alert('As senhas não coincidem')
-      return
-    }
-
-    if (newPasswordData.password.length < 6) {
-      alert('A senha deve ter pelo menos 6 caracteres')
-      return
-    }
-
-    setPasswordChangeLoading(true)
-
-    try {
-      // Update password in Supabase Auth
-      const { error: authError } = await supabase.auth.updateUser({
-        password: newPasswordData.password
-      })
-
-      if (authError) {
-        alert(`Erro ao atualizar senha: ${authError.message}`)
-        setPasswordChangeLoading(false)
-        return
-      }
-
-      // Update primeiro_login flag in database
-      const { error: dbError } = await supabase
-        .from('usuarios')
-        .update({ primeiro_login: false })
-        .eq('email', user?.email)
-
-      if (dbError) {
-        console.error('Erro ao atualizar flag primeiro_login:', dbError)
-      }
-
-      alert('Senha alterada com sucesso!')
-      setShowPasswordChange(false)
-      setNewPasswordData({ password: '', confirmPassword: '' })
-
-    } catch (error) {
-      console.error('Erro ao alterar senha:', error)
-      alert('Erro ao alterar senha')
-    }
-
-    setPasswordChangeLoading(false)
-  }
 
   // Load usuarios from Supabase
   useEffect(() => {
@@ -336,44 +258,47 @@ export default function CostApprovalApp() {
 
     const loadSolicitacoes = async () => {
       try {
-        // Primeiro, vamos tentar criar a tabela se não existir
-        await createSolicitacoesTable()
-        
-        // Depois carregar os dados
+        // Carregar dados da tabela solicitacoes_custo_extra
         const { data, error } = await supabase
-          .from('solicitacoes_autorizacao')
+          .from('solicitacoes_custo_extra')
           .select('*')
-          .order('data_criacao', { ascending: false })
+          .order('requested_at', { ascending: false })
+          .order('data_abertura', { ascending: false })
+          .order('hora_abertura', { ascending: false })
         
         if (error) {
           console.error('Erro ao carregar solicitações:', error)
-          // Se a tabela não existir, usar dados mock
-          loadMockData()
+          if (error.code === 'PGRST205') {
+            // tabela inexistente
+            loadMockData()
+          }
           return
         }
         
+        // Mapeamento de status PT-BR para EN
+        const mapStatus = (s: string) => ({ 'pendente':'pending', 'aprovado':'approved', 'rejeitado':'rejected' }[s] || s)
+        
         // Converter dados do Supabase para o formato do app
         const convertedRequests = data?.map(item => ({
-          id: item.id.toString(),
+          id: String(item.id),
           numeroNotaFiscal: item.numero_nota_fiscal,
-          valorNotaFiscal: item.valor_nota_fiscal,
+          valorNotaFiscal: Number(item.valor_nota_fiscal) || 0,
           destinatario: item.destinatario || '',
           cidadeDestino: item.cidade_destino || '',
           quantidadeVolumes: item.quantidade_volumes || 0,
           tipoCustoExtra: item.tipo_custo_extra,
           descritivoTipoCusto: item.descritivo_tipo_custo,
-          valorCustoAdicional: item.valor_custo_adicional,
+          valorCustoAdicional: item.valor_custo_adicional == null ? undefined : Number(item.valor_custo_adicional),
           anexoUrl: item.anexo_url,
           anexoNome: item.anexo_nome,
-          requestedBy: item.usuario_criador,
-          requestedAt: `${item.data_criacao}T${item.hora_criacao}`,
-          status: item.status === 'pendente' ? 'pending' : 
-                  item.status === 'aprovada' ? 'approved' : 'rejected',
-          approvedBy: item.usuario_aprovador,
-          approvedAt: item.data_aprovacao && item.hora_aprovacao ? 
-                     `${item.data_aprovacao}T${item.hora_aprovacao}` : undefined,
-          comments: item.observacao_aprovacao,
-          approvalHistory: []
+          requestedBy: item.criado_por_nome,
+          requestedAt: item.requested_at || `${item.data_abertura}T${item.hora_abertura}`,
+          status: mapStatus(item.status),
+          approvedBy: item.decidido_por_nome,
+          approvedAt: item.approved_at || (item.data_decisao && item.hora_decisao ? 
+                     `${item.data_decisao}T${item.hora_decisao}` : undefined),
+          comments: item.observacao_decisao || item.comments,
+          approvalHistory: item.approval_history || []
         })) || []
         
         setRequests(convertedRequests)
@@ -385,110 +310,6 @@ export default function CostApprovalApp() {
     
     loadSolicitacoes()
   }, [user])
-
-  // Create table and load mock data
-  const createSolicitacoesTable = async () => {
-    try {
-      // Tentar inserir dados mock - se a tabela não existir, será criada automaticamente pelo Supabase
-      const mockData = [
-        {
-          numero_nota_fiscal: 'NF001234',
-          valor_nota_fiscal: 15000.00,
-          destinatario: 'Cliente ABC Ltda',
-          cidade_destino: 'São Paulo - SP',
-          quantidade_volumes: 25,
-          tipo_custo_extra: 'Diaria',
-          descritivo_tipo_custo: 'Necessário pernoite devido ao horário de entrega restrito do cliente',
-          valor_custo_adicional: 350.00,
-          usuario_criador: 'João Silva',
-          data_criacao: '2024-01-15',
-          hora_criacao: '09:30:00',
-          status: 'aprovada',
-          usuario_aprovador: 'Maria Santos',
-          data_aprovacao: '2024-01-15',
-          hora_aprovacao: '14:20:00',
-          observacao_aprovacao: 'Aprovado conforme justificativa apresentada'
-        },
-        {
-          numero_nota_fiscal: 'NF001235',
-          valor_nota_fiscal: 8500.00,
-          destinatario: 'Empresa XYZ S.A.',
-          cidade_destino: 'Rio de Janeiro - RJ',
-          quantidade_volumes: 12,
-          tipo_custo_extra: 'Reentrega',
-          descritivo_tipo_custo: 'Cliente não estava presente na primeira tentativa de entrega',
-          valor_custo_adicional: 180.00,
-          usuario_criador: 'Pedro Costa',
-          data_criacao: '2024-01-16',
-          hora_criacao: '11:15:00',
-          status: 'aprovada',
-          usuario_aprovador: 'Carlos Lima',
-          data_aprovacao: '2024-01-16',
-          hora_aprovacao: '16:45:00',
-          observacao_aprovacao: 'Aprovado - situação comum neste cliente'
-        },
-        {
-          numero_nota_fiscal: 'NF001236',
-          valor_nota_fiscal: 22000.00,
-          destinatario: 'Indústria DEF Ltda',
-          cidade_destino: 'Belo Horizonte - MG',
-          quantidade_volumes: 45,
-          tipo_custo_extra: 'Veiculo Dedicado',
-          descritivo_tipo_custo: 'Carga frágil requer transporte exclusivo com cuidados especiais',
-          valor_custo_adicional: 1200.00,
-          usuario_criador: 'Ana Oliveira',
-          data_criacao: '2024-01-17',
-          hora_criacao: '08:45:00',
-          status: 'pendente'
-        },
-        {
-          numero_nota_fiscal: 'NF001237',
-          valor_nota_fiscal: 5200.00,
-          destinatario: 'Comércio GHI ME',
-          cidade_destino: 'Salvador - BA',
-          quantidade_volumes: 8,
-          tipo_custo_extra: 'Armazenagem',
-          descritivo_tipo_custo: 'Necessário armazenagem por 3 dias devido a problemas no recebimento',
-          valor_custo_adicional: 450.00,
-          usuario_criador: 'Lucas Ferreira',
-          data_criacao: '2024-01-18',
-          hora_criacao: '14:20:00',
-          status: 'recusada',
-          usuario_aprovador: 'Maria Santos',
-          data_aprovacao: '2024-01-18',
-          hora_aprovacao: '17:30:00',
-          observacao_aprovacao: 'Recusado - cliente deve arcar com custos de armazenagem conforme contrato'
-        },
-        {
-          numero_nota_fiscal: 'NF001238',
-          valor_nota_fiscal: 18500.00,
-          destinatario: 'Distribuidora JKL S.A.',
-          cidade_destino: 'Brasília - DF',
-          quantidade_volumes: 32,
-          tipo_custo_extra: 'Pernoite',
-          descritivo_tipo_custo: 'Entrega em horário comercial exige pernoite do motorista',
-          valor_custo_adicional: 280.00,
-          usuario_criador: 'Fernanda Souza',
-          data_criacao: '2024-01-19',
-          hora_criacao: '10:10:00',
-          status: 'pendente'
-        }
-      ]
-
-      // Tentar inserir cada item individualmente
-      for (const item of mockData) {
-        try {
-          await supabase
-            .from('solicitacoes_autorizacao')
-            .insert(item)
-        } catch (insertError) {
-          console.log('Item já existe ou erro na inserção:', insertError)
-        }
-      }
-    } catch (error) {
-      console.log('Tabela pode não existir ainda:', error)
-    }
-  }
 
   // Load mock data if Supabase is not available
   const loadMockData = () => {
@@ -802,7 +623,7 @@ export default function CostApprovalApp() {
           email: newUserData.email,
           tipo_autorizacao: newUserData.tipo_autorizacao,
           transportador: newUserData.transportador || null,
-          primeiro_login: true // Flag para forçar mudança de senha
+          primeiro_login: false // Não força mudança de senha
         })
 
       if (dbError) {
@@ -828,7 +649,7 @@ export default function CostApprovalApp() {
         transportador: ''
       })
       setShowCreateUser(false)
-      alert('Usuário criado com sucesso! O usuário deverá alterar a senha no primeiro login.')
+      alert('Usuário criado com sucesso!')
 
     } catch (error) {
       console.error('Erro ao criar usuário:', error)
@@ -975,14 +796,16 @@ export default function CostApprovalApp() {
         valor_custo_adicional: parseFloat(formData.valorCustoAdicional),
         anexo_url: anexoUrl,
         anexo_nome: anexoNome,
-        usuario_criador: currentUser.nome,
-        data_criacao: now.toISOString().split('T')[0],
-        hora_criacao: now.toTimeString().split(' ')[0],
-        status: 'pendente'
+        criado_por_nome: currentUser.nome,
+        criado_por_email: currentUser.email,
+        criado_por_id: user?.id,
+        data_abertura: now.toISOString().split('T')[0],
+        hora_abertura: now.toTimeString().split(' ')[0],
+        status: 'pending'
       }
 
       const { data: supabaseData, error: supabaseError } = await supabase
-        .from('solicitacoes_autorizacao')
+        .from('solicitacoes_custo_extra')
         .insert(solicitacaoData)
         .select()
         .single()
@@ -1064,15 +887,19 @@ export default function CostApprovalApp() {
       // Update in Supabase
       const now = new Date()
       const updateData = {
-        status: action === 'approved' ? 'aprovada' : 'recusada',
-        usuario_aprovador: currentUser?.nome || 'Gestor Responsável',
-        data_aprovacao: now.toISOString().split('T')[0],
-        hora_aprovacao: now.toTimeString().split(' ')[0],
-        observacao_aprovacao: comments || ''
+        status: action,
+        decidido_por_nome: currentUser?.nome || 'Gestor Responsável',
+        decidido_por_email: currentUser?.email || '',
+        decidido_por_id: user?.id || '',
+        data_decisao: now.toISOString().split('T')[0],
+        hora_decisao: now.toTimeString().split(' ')[0],
+        approved_at: action === 'approved' ? now.toISOString() : null,
+        observacao_decisao: comments || '',
+        comments: comments || ''
       }
 
       const { error: supabaseError } = await supabase
-        .from('solicitacoes_autorizacao')
+        .from('solicitacoes_custo_extra')
         .update(updateData)
         .eq('id', parseInt(id))
 
@@ -1250,50 +1077,68 @@ export default function CostApprovalApp() {
     }
   }
 
-  // Generate mock data for charts
+  // Generate chart data from requests
   const getChartData = () => {
-    // Monthly evolution data (last 12 months)
-    const monthlyData = [
-      { month: 'Jan', aprovados: 45000, recusados: 12000, pendentes: 8000 },
-      { month: 'Fev', aprovados: 52000, recusados: 15000, pendentes: 10000 },
-      { month: 'Mar', aprovados: 48000, recusados: 18000, pendentes: 12000 },
-      { month: 'Abr', aprovados: 61000, recusados: 14000, pendentes: 9000 },
-      { month: 'Mai', aprovados: 55000, recusados: 16000, pendentes: 11000 },
-      { month: 'Jun', aprovados: 67000, recusados: 13000, pendentes: 8500 },
-      { month: 'Jul', aprovados: 59000, recusados: 17000, pendentes: 13000 },
-      { month: 'Ago', aprovados: 63000, recusados: 15500, pendentes: 9500 },
-      { month: 'Set', aprovados: 58000, recusados: 19000, pendentes: 14000 },
-      { month: 'Out', aprovados: 71000, recusados: 12500, pendentes: 7500 },
-      { month: 'Nov', aprovados: 65000, recusados: 16500, pendentes: 10500 },
-      { month: 'Dez', aprovados: 69000, recusados: 14500, pendentes: 8800 }
-    ]
+    // Evolução mensal: somar valores por mês e por status usando requestedAt
+    const monthlyData = []
+    const monthNames = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
+    
+    for (let i = 0; i < 12; i++) {
+      const month = monthNames[i]
+      const monthRequests = requests.filter(req => {
+        const reqDate = new Date(req.requestedAt)
+        return reqDate.getMonth() === i
+      })
+      
+      const aprovados = monthRequests.filter(req => req.status === 'approved').reduce((sum, req) => sum + req.valorNotaFiscal, 0)
+      const recusados = monthRequests.filter(req => req.status === 'rejected').reduce((sum, req) => sum + req.valorNotaFiscal, 0)
+      const pendentes = monthRequests.filter(req => req.status === 'pending').reduce((sum, req) => sum + req.valorNotaFiscal, 0)
+      
+      monthlyData.push({ month, aprovados, recusados, pendentes })
+    }
 
-    // Top 5 cost types
-    const costTypesData = [
-      { tipo: 'Diária', valor: 125000 },
-      { tipo: 'Pernoite', valor: 98000 },
-      { tipo: 'Veículo Dedicado', valor: 87000 },
-      { tipo: 'Armazenagem', valor: 76000 },
-      { tipo: 'Reentrega', valor: 65000 }
-    ]
+    // Top 5 tipos de custo: somar valorCustoAdicional por tipoCustoExtra
+    const costTypesMap = new Map()
+    requests.forEach(req => {
+      if (req.valorCustoAdicional) {
+        const current = costTypesMap.get(req.tipoCustoExtra) || 0
+        costTypesMap.set(req.tipoCustoExtra, current + req.valorCustoAdicional)
+      }
+    })
+    
+    const costTypesData = Array.from(costTypesMap.entries())
+      .map(([tipo, valor]) => ({ tipo, valor }))
+      .sort((a, b) => b.valor - a.valor)
+      .slice(0, 5)
 
-    // Top 5 clients/destinations
-    const clientsData = [
-      { nome: 'Cliente A - São Paulo', valor: 145000 },
-      { nome: 'Cliente B - Rio de Janeiro', valor: 132000 },
-      { nome: 'Cliente C - Belo Horizonte', valor: 118000 },
-      { nome: 'Cliente D - Salvador', valor: 105000 },
-      { nome: 'Cliente E - Brasília', valor: 98000 }
-    ]
+    // Top 5 clientes/destinos: somar por destinatario
+    const clientsMap = new Map()
+    requests.forEach(req => {
+      const key = `${req.destinatario} - ${req.cidadeDestino}`
+      const current = clientsMap.get(key) || 0
+      clientsMap.set(key, current + req.valorNotaFiscal)
+    })
+    
+    const clientsData = Array.from(clientsMap.entries())
+      .map(([nome, valor]) => ({ nome, valor }))
+      .sort((a, b) => b.valor - a.valor)
+      .slice(0, 5)
 
-    // Status distribution
+    // Distribuição por status: porcentagem por status
+    const totalRequests = requests.length
+    const statusCounts = {
+      approved: requests.filter(req => req.status === 'approved').length,
+      pending: requests.filter(req => req.status === 'pending').length,
+      rejected: requests.filter(req => req.status === 'rejected').length
+    }
+    
     const statusData = [
-      { name: 'Aprovados', value: 65, color: '#10B981' },
-      { name: 'Pendentes', value: 20, color: '#F59E0B' },
-      { name: 'Recusados', value: 15, color: '#EF4444' }
+      { name: 'Aprovados', value: totalRequests > 0 ? Math.round((statusCounts.approved / totalRequests) * 100) : 0, color: '#10B981' },
+      { name: 'Pendentes', value: totalRequests > 0 ? Math.round((statusCounts.pending / totalRequests) * 100) : 0, color: '#F59E0B' },
+      { name: 'Recusados', value: totalRequests > 0 ? Math.round((statusCounts.rejected / totalRequests) * 100) : 0, color: '#EF4444' }
     ]
 
-    // Heatmap data (day of week x hour)
+    // Heatmap data (day of week x hour) - mock data for now
     const heatmapData = [
       { day: 'Seg', '08h': 12, '09h': 18, '10h': 25, '11h': 22, '14h': 28, '15h': 24, '16h': 19, '17h': 15 },
       { day: 'Ter', '08h': 15, '09h': 22, '10h': 28, '11h': 26, '14h': 32, '15h': 29, '16h': 23, '17h': 18 },
@@ -1474,76 +1319,6 @@ export default function CostApprovalApp() {
                 </form>
               </div>
             )}
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // Password Change Modal for First Login
-  if (showPasswordChange) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-        <div className="max-w-md w-full">
-          <div className="bg-white rounded-2xl shadow-2xl p-8 border">
-            <div className="text-center mb-8">
-              <img 
-                src="https://k6hrqrxuu8obbfwn.public.blob.vercel-storage.com/temp/68fe0e32-ff18-4829-bbfc-2d8261113bee.png" 
-                alt="Logo da Empresa" 
-                className="h-16 w-auto mx-auto mb-4"
-              />
-              <h1 className="text-2xl font-bold text-gray-900 mb-2">Alterar Senha</h1>
-              <p className="text-gray-700">Por favor, crie uma nova senha para continuar</p>
-            </div>
-
-            <form onSubmit={handlePasswordChange} className="space-y-6">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Nova Senha
-                </label>
-                <input
-                  type="password"
-                  value={newPasswordData.password}
-                  onChange={(e) => setNewPasswordData(prev => ({ ...prev, password: e.target.value }))}
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-500 focus:border-transparent"
-                  placeholder="Digite sua nova senha"
-                  required
-                  minLength={6}
-                  disabled={passwordChangeLoading}
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Confirmar Nova Senha
-                </label>
-                <input
-                  type="password"
-                  value={newPasswordData.confirmPassword}
-                  onChange={(e) => setNewPasswordData(prev => ({ ...prev, confirmPassword: e.target.value }))}
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-500 focus:border-transparent"
-                  placeholder="Confirme sua nova senha"
-                  required
-                  minLength={6}
-                  disabled={passwordChangeLoading}
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={passwordChangeLoading}
-                className="w-full bg-slate-600 text-white py-3 px-4 rounded-lg hover:bg-slate-700 transition-all duration-300 font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center shadow-lg hover:shadow-xl"
-              >
-                {passwordChangeLoading ? (
-                  <>
-                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
-                    Alterando...
-                  </>
-                ) : (
-                  'Alterar Senha'
-                )}
-              </button>
-            </form>
           </div>
         </div>
       </div>
@@ -3192,7 +2967,7 @@ export default function CostApprovalApp() {
 
                     <div>
                       <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
-                        Senha Temporária *
+                        Senha *
                       </label>
                       <input
                         type="password"
@@ -3205,7 +2980,7 @@ export default function CostApprovalApp() {
                         }`}
                         required
                         minLength={6}
-                        placeholder="Usuário deverá alterar no primeiro login"
+                        placeholder="Senha do usuário"
                       />
                     </div>
 
@@ -3370,15 +3145,9 @@ export default function CostApprovalApp() {
                           {usuario.transportador || '-'}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          {usuario.primeiro_login ? (
-                            <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-yellow-100 text-yellow-800">
-                              Primeiro Login
-                            </span>
-                          ) : (
-                            <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800">
-                              Ativo
-                            </span>
-                          )}
+                          <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800">
+                            Ativo
+                          </span>
                         </td>
                       </tr>
                     ))}
